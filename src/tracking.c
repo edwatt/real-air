@@ -8,8 +8,10 @@
 #define AIR_PID 0x0424
 
 // this is a guess
-// ~3906000 tps, packets come every ~3906 ticks, 1000 Hz packets
-#define TICK_LEN (1.0f / 3906000.0f)
+// ticks are in nanoseconds, 1000 Hz packets
+#define TICK_LEN (1.0f / 1E9f)
+
+#define GYRO_SCALE (1.0f / 256.0f)
 
 static hid_device* device = 0;
 static pthread_t thread = 0;
@@ -18,8 +20,8 @@ static versor rotation = GLM_QUAT_IDENTITY_INIT;
 static bool running = false;
 
 typedef struct {
-	uint32_t tick;
-	int16_t ang_vel[3];
+	uint64_t tick;
+	int32_t ang_vel[3];
 } air_sample;
 
 static int
@@ -30,25 +32,38 @@ parse_report(const unsigned char* buffer, int size, air_sample* out_sample)
 		return -1;
 	}
 
-	buffer += 5;
-	out_sample->tick = *(buffer++) | (*(buffer++) << 8) | (*(buffer++) << 16) | (*(buffer++) << 24);
-	buffer += 10;
-	out_sample->ang_vel[0] = *(buffer++) | (*(buffer++) << 8);
-	buffer++;
-	out_sample->ang_vel[1] = *(buffer++) | (*(buffer++) << 8);
-	buffer++;
-	out_sample->ang_vel[2] = *(buffer++) | (*(buffer++) << 8);
+	buffer += 4;
+	out_sample->tick = ((uint64_t)*(buffer++)) | (((uint64_t)*(buffer++))  << 8) | (((uint64_t)*(buffer++)) << 16) | (((uint64_t)*(buffer++)) << 24) 
+						| (((uint64_t)*(buffer++)) << 32) | (((uint64_t)*(buffer++))  << 40) | (((uint64_t)*(buffer++))  << 48) | (((uint64_t)*(buffer++))  << 56);
+	buffer += 6;
+	if( *(buffer+2) & 0x80 ) {
+		out_sample->ang_vel[0] = (0xff << 24) | *(buffer++) | (*(buffer++) << 8) | (*(buffer++) << 16);
+	} else {
+		out_sample->ang_vel[0] = *(buffer++) | (*(buffer++) << 8) | (*(buffer++) << 16);
+	}
+	
+	if( *(buffer+2) & 0x80 ) {
+		out_sample->ang_vel[1] = (0xff << 24) | *(buffer++) | (*(buffer++) << 8) | (*(buffer++) << 16);
+	} else {
+		out_sample->ang_vel[1] = *(buffer++) | (*(buffer++) << 8) | (*(buffer++) << 16);
+	}
+
+	if( *(buffer+2) & 0x80 ) {
+		out_sample->ang_vel[2] = (0xff << 24) | *(buffer++) | (*(buffer++) << 8) | (*(buffer++) << 16);
+	} else {
+		out_sample->ang_vel[2] = *(buffer++) | (*(buffer++) << 8) | (*(buffer++) << 16);
+	}
 
 	return 0;
 }
 
 static void
-process_ang_vel(const int16_t ang_vel[3], vec3 out_vec)
+process_ang_vel(const int32_t ang_vel[3], vec3 out_vec)
 {
 	// these scale and bias corrections are all rough guesses
-	out_vec[0] = (float)(ang_vel[0] + 15) * -0.001f;
-	out_vec[1] = (float)(ang_vel[2] - 6) * 0.001f;
-	out_vec[2] = (float)(ang_vel[1] + 15) * 0.001f;
+	out_vec[0] = (float)(ang_vel[0]) * -0.001f * GYRO_SCALE;
+	out_vec[1] = (float)(ang_vel[2]) * 0.001f * GYRO_SCALE;
+	out_vec[2] = (float)(ang_vel[1]) * 0.001f * GYRO_SCALE;
 }
 
 static hid_device*
@@ -94,7 +109,7 @@ static void*
 track(void* arg)
 {
 	unsigned char buffer[64] = {};
-	uint32_t last_sample_tick = 0;
+	uint64_t last_sample_tick = 0;
 	air_sample sample = {};
 	vec3 ang_vel = {};
 
@@ -111,7 +126,7 @@ track(void* arg)
 		parse_report(buffer, sizeof(buffer), &sample);
 		process_ang_vel(sample.ang_vel, ang_vel);
 
-		uint32_t tick_delta = 3906;
+		uint64_t tick_delta = 1000000;
 		if (last_sample_tick > 0)
 			tick_delta = sample.tick - last_sample_tick;
 
